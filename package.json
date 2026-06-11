@@ -1,0 +1,22 @@
+{
+  "name": "koperasi-mock-api",
+  "version": "1.0.0",
+  "description": "Mock API neraca lajur koperasi (akuntansi) untuk pengujian integrasi SIMKOPDA. Menyediakan data 5 koperasi, tahun buku 2020-2026.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "check": "node scripts/check.js"
+  },
+  "keywords": [
+    "koperasi",
+    "mock",
+    "neraca-lajur",
+    "simkopda",
+    "testing"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}
