@@ -294,10 +294,20 @@ function rateForNominal(produk, nominal) {
   return parsed[parsed.length - 1].rate;                        // di atas maksimum
 }
 
+/** Ambil biaya administrasi per bulan dari struktur produk. */
+function adminNominal(produk) {
+  const a = produk.detail && produk.detail.biaya && produk.detail.biaya.administrasi;
+  const n = a && a.nominal != null ? parseFloat(a.nominal) : 0;
+  return Number.isNaN(n) ? 0 : n;
+}
+
 /** Simulasi simpanan (bunga sederhana, durasi dalam bulan). */
 function simulasiSimpanan(produk, nominal, durasi) {
   const r = rateForNominal(produk, nominal);
   const bunga = nominal * (r / 100) * (durasi / 12);
+  const biayaAdmin = adminNominal(produk);          // per bulan
+  const totalBiayaAdmin = biayaAdmin * durasi;      // selama durasi
+  const saldoAkhir = nominal + bunga - totalBiayaAdmin;
   return {
     jenis: 'simpanan',
     produk: produk.nama,
@@ -308,30 +318,75 @@ function simulasiSimpanan(produk, nominal, durasi) {
     metode: 'bunga sederhana',
     estimasi_bunga: Math.round(bunga),
     total_bunga: Math.round(bunga),
-    total_estimasi: Math.round(nominal + bunga),
-    total_uang: Math.round(nominal + bunga),
+    biaya_admin: Math.round(biayaAdmin),             // per bulan
+    total_biaya_admin: Math.round(totalBiayaAdmin),  // total selama durasi
+    total_estimasi: Math.round(saldoAkhir),          // saldo akhir = setoran + bunga - biaya admin
+    total_uang: Math.round(saldoAkhir),
   };
 }
 
-/** Simulasi pinjaman (metode flat, durasi dalam bulan). */
+/**
+ * Simulasi pinjaman. Menghormati metode produk:
+ *  - 'menurun' (efektif): bunga dihitung dari SISA pokok → bunga & angsuran
+ *    menurun tiap bulan, pokok tetap.
+ *  - 'anuitas': angsuran tetap, komposisi pokok/bunga berubah.
+ *  - 'flat' (default): bunga dari pokok awal → bunga & angsuran tetap.
+ * Durasi dalam bulan; jadwal mencakup seluruh tenor.
+ */
 function simulasiPinjaman(produk, nominal, durasi) {
   const r = rateForNominal(produk, nominal);
-  const totalBunga = nominal * (r / 100) * (durasi / 12);
+  const metode = (produk.detail && produk.detail.bunga && produk.detail.bunga.metode) || 'flat';
+  const monthlyRate = (r / 100) / 12;
   const pokokPerBulan = nominal / durasi;
-  const bungaPerBulan = totalBunga / durasi;
-  const angsuran = pokokPerBulan + bungaPerBulan;
 
   const jadwal = [];
   let sisa = nominal;
-  for (let m = 1; m <= Math.min(durasi, 12); m++) {
-    sisa -= pokokPerBulan;
-    jadwal.push({
-      bulan: m,
-      angsuran: Math.round(angsuran),
-      pokok: Math.round(pokokPerBulan),
-      bunga: Math.round(bungaPerBulan),
-      sisa_pokok: Math.max(0, Math.round(sisa)),
-    });
+  let totalBunga = 0;
+
+  if (metode === 'anuitas' && monthlyRate > 0) {
+    // Angsuran tetap (anuitas).
+    const angsuran = (nominal * monthlyRate) / (1 - Math.pow(1 + monthlyRate, -durasi));
+    for (let m = 1; m <= durasi; m++) {
+      const bunga = sisa * monthlyRate;
+      const pokok = angsuran - bunga;
+      sisa -= pokok;
+      totalBunga += bunga;
+      jadwal.push({
+        bulan: m,
+        angsuran: Math.round(angsuran),
+        pokok: Math.round(pokok),
+        bunga: Math.round(bunga),
+        sisa_pokok: Math.max(0, Math.round(sisa)),
+      });
+    }
+  } else if (metode === 'menurun' || metode === 'efektif') {
+    // Bunga menurun: pokok tetap, bunga atas sisa pokok.
+    for (let m = 1; m <= durasi; m++) {
+      const bunga = sisa * monthlyRate;
+      sisa -= pokokPerBulan;
+      totalBunga += bunga;
+      jadwal.push({
+        bulan: m,
+        angsuran: Math.round(pokokPerBulan + bunga),
+        pokok: Math.round(pokokPerBulan),
+        bunga: Math.round(bunga),
+        sisa_pokok: Math.max(0, Math.round(sisa)),
+      });
+    }
+  } else {
+    // Flat: bunga tetap atas pokok awal.
+    const bungaPerBulan = (nominal * (r / 100) * (durasi / 12)) / durasi;
+    for (let m = 1; m <= durasi; m++) {
+      sisa -= pokokPerBulan;
+      totalBunga += bungaPerBulan;
+      jadwal.push({
+        bulan: m,
+        angsuran: Math.round(pokokPerBulan + bungaPerBulan),
+        pokok: Math.round(pokokPerBulan),
+        bunga: Math.round(bungaPerBulan),
+        sisa_pokok: Math.max(0, Math.round(sisa)),
+      });
+    }
   }
 
   return {
@@ -341,8 +396,8 @@ function simulasiPinjaman(produk, nominal, durasi) {
     plafon: Math.round(nominal),
     tenor_bulan: durasi,
     suku_bunga: rateStr(r) + '%',
-    metode: (produk.detail && produk.detail.bunga && produk.detail.bunga.metode) || 'flat',
-    angsuran_per_bulan: Math.round(angsuran),
+    metode,
+    angsuran_per_bulan: jadwal.length ? jadwal[0].angsuran : 0,
     total_bunga: Math.round(totalBunga),
     total_pembayaran: Math.round(nominal + totalBunga),
     total_uang: Math.round(nominal + totalBunga),
