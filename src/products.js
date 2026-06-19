@@ -267,17 +267,36 @@ function findProduk(kode, kind, id) {
   return list.find((p) => String(p.id) === String(id)) || null;
 }
 
-/** Ambil rate tertinggi dari struktur suku_bunga (untuk estimasi). */
-function topRate(produk) {
+/**
+ * Pilih suku bunga sesuai NOMINAL dari struktur berjenjang.
+ * Mencari `tingkat` yang `nominal_dari <= nominal <= nominal_sampai`.
+ * Bila nominal di bawah bracket terendah → pakai tingkat terendah; bila di
+ * atas bracket tertinggi → pakai tingkat tertinggi. `nominal_sampai` null
+ * dianggap tak terbatas.
+ */
+function rateForNominal(produk, nominal) {
   const sb = (produk.detail && produk.detail.bunga && produk.detail.bunga.suku_bunga) || [];
   const tingkat = (sb[0] && sb[0].tingkat) || [];
-  const rates = tingkat.map((t) => parseFloat(t.jumlah)).filter((x) => !Number.isNaN(x));
-  return rates.length ? Math.max(...rates) : 0;
+  const parsed = tingkat
+    .map((t) => ({
+      rate: parseFloat(t.jumlah),
+      dari: t.nominal_dari != null ? parseFloat(t.nominal_dari) : -Infinity,
+      sampai: t.nominal_sampai != null ? parseFloat(t.nominal_sampai) : Infinity,
+    }))
+    .filter((t) => !Number.isNaN(t.rate))
+    .sort((a, b) => a.dari - b.dari);
+
+  if (!parsed.length) return 0;
+
+  const hit = parsed.find((t) => nominal >= t.dari && nominal <= t.sampai);
+  if (hit) return hit.rate;
+  if (nominal < parsed[0].dari) return parsed[0].rate;          // di bawah minimum
+  return parsed[parsed.length - 1].rate;                        // di atas maksimum
 }
 
 /** Simulasi simpanan (bunga sederhana, durasi dalam bulan). */
 function simulasiSimpanan(produk, nominal, durasi) {
-  const r = topRate(produk);
+  const r = rateForNominal(produk, nominal);
   const bunga = nominal * (r / 100) * (durasi / 12);
   return {
     jenis: 'simpanan',
@@ -296,7 +315,7 @@ function simulasiSimpanan(produk, nominal, durasi) {
 
 /** Simulasi pinjaman (metode flat, durasi dalam bulan). */
 function simulasiPinjaman(produk, nominal, durasi) {
-  const r = topRate(produk);
+  const r = rateForNominal(produk, nominal);
   const totalBunga = nominal * (r / 100) * (durasi / 12);
   const pokokPerBulan = nominal / durasi;
   const bungaPerBulan = totalBunga / durasi;
