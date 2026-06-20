@@ -20,6 +20,16 @@ const { jitter } = require('./rng');
  *   3. KONTINU  : saldo_awal tahun Y = saldo_akhir tahun (Y-1) untuk akun permanen.
  *   4. SHU NYAMBUNG: 331 (SHU tahun berjalan) = pendapatan - beban; 515
  *                 (penyusutan) = pertambahan akumulasi penyusutan.
+ *
+ * Periode sub-tahunan (triwulan / semester):
+ *   snapshot(kop, year, { f0, f1 }) menarik neraca lajur YEAR-TO-DATE pada
+ *   jendela [f0, f1] dari tahun buku (f = fraksi hari yang sudah berjalan, 0..1):
+ *     - akun PERMANEN  : saldo di-interpolasi linear antara tutup-buku tahun
+ *                        (Y-1) [f=0] dan tutup-buku tahun Y [f=1]; Kas tetap
+ *                        penyeimbang sehingga BALANCE di fraksi berapa pun.
+ *     - akun NOMINAL   : terakumulasi proporsional -> saldo = f * jumlah setahun.
+ *   Triwulan I (…-03-31) ≈ f1=0.25, Semester I (…-06-30) ≈ 0.5, Tahunan = 1.
+ *   Tanpa opsi (atau f0=0,f1=1) hasilnya IDENTIK dengan neraca setahun penuh.
  */
 
 const FIRST_YEAR = 2020;   // tahun buku pertama yang "tersedia"
@@ -57,6 +67,50 @@ const CHURN_BASE = {
 };
 
 const round1000 = (x) => Math.round(x / 1000) * 1000;
+const clamp01 = (x) => Math.max(0, Math.min(1, x));
+
+// ── Periode sub-tahunan: konversi tanggal -> fraksi tahun (0..1) ─────────────
+const DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+const isLeap = (y) => (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+const daysInYear = (y) => (isLeap(y) ? 366 : 365);
+
+/** Nomor hari ke-N dalam tahun (1 Jan = 1). */
+function dayOfYear(y, m, d) {
+  let n = d;
+  for (let i = 0; i < m - 1; i++) n += DAYS_IN_MONTH[i];
+  if (m > 2 && isLeap(y)) n += 1;
+  return n;
+}
+
+/** Parse 'YYYY-MM-DD' -> {y,m,d} | null. */
+function parseDate(s) {
+  if (!s) return null;
+  const mt = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(String(s));
+  if (!mt) return null;
+  const y = +mt[1], m = +mt[2], d = +mt[3];
+  if (m < 1 || m > 12 || d < 1 || d > 31) return null;
+  return { y, m, d };
+}
+
+/**
+ * Konversi (tanggal_dari, tanggal_sampai) -> jendela fraksi {f0, f1} pada
+ * tahun buku. Tanggal di luar tahun buku diabaikan (default f0=0 / f1=1) supaya
+ * permintaan setahun penuh tetap menghasilkan angka identik.
+ */
+function fractionsFromDates(bukuYear, dari, sampai) {
+  const pd = parseDate(dari);
+  const ps = parseDate(sampai);
+  let f0 = 0;
+  let f1 = 1;
+  if (pd && pd.y === bukuYear) {
+    f0 = clamp01((dayOfYear(pd.y, pd.m, pd.d) - 1) / daysInYear(bukuYear));
+  }
+  if (ps && ps.y === bukuYear) {
+    f1 = clamp01(dayOfYear(ps.y, ps.m, ps.d) / daysInYear(bukuYear));
+  }
+  if (f1 < f0) f1 = f0; // jaga-jaga: rentang terbalik
+  return { f0, f1 };
+}
 
 /** Skala (≈ total aset) untuk koperasi & tahun tertentu. */
 function scale(kop, year) {
@@ -151,13 +205,60 @@ function closingMap(kop, year) {
   return m;
 }
 
-/** Hitung kolom debit/kredit dari mutasi (closing - opening) sesuai sisi normal. */
-function mutationColumns(acc, open, close) {
+// Akun permanen non-kas (kas adalah penyeimbang, dihitung terpisah).
+const PERMANEN_NONKAS = [
+  '113010000', '113020000', '121000000', '122000000', '123000000', '124000000',
+  '211010000', '211020000', '212000000', '221000000',
+  '311000000', '312000000', '321000000', '322000000', '331000000', '332000000',
+];
+const KEWAJIBAN_MODAL = [
+  '211010000', '211020000', '212000000', '221000000',
+  '311000000', '312000000', '321000000', '322000000', '331000000', '332000000',
+];
+
+/**
+ * Saldo akun permanen pada fraksi tahun f (0..1): interpolasi linear antara
+ * tutup-buku (year-1) [f=0] dan tutup-buku (year) [f=1]. Kas di-plug ulang
+ * sehingga BALANCE tetap exact di fraksi berapa pun (interpolasi dua keadaan
+ * balance pasti balance). f<=0/f>=1 dikembalikan persis closingMap agar
+ * neraca setahun penuh identik dengan versi lama.
+ */
+function balanceAtFraction(kop, year, f) {
+  if (f <= 0) return closingMap(kop, year - 1);
+  if (f >= 1) return closingMap(kop, year);
+
+  const O = closingMap(kop, year - 1);
+  const C = closingMap(kop, year);
+  const m = {};
+  for (const kode of PERMANEN_NONKAS) {
+    m[kode] = round1000(O[kode] + f * (C[kode] - O[kode]));
+  }
+
+  const kewajibanModal = KEWAJIBAN_MODAL.reduce((s, k) => s + m[k], 0);
+  const asetNonKas =
+    (m['113010000'] - m['113020000']) +
+    (m['121000000'] + m['122000000'] + m['123000000'] - m['124000000']);
+
+  const kasTotal = kewajibanModal - asetNonKas; // penyeimbang -> balance exact
+  const kas1 = round1000(0.45 * kasTotal);
+  const kas2 = round1000(0.45 * kasTotal);
+  m['111010000'] = kas1;
+  m['111020000'] = kas2;
+  m['112010000'] = kasTotal - kas1 - kas2;
+  return m;
+}
+
+/**
+ * Hitung kolom debit/kredit dari mutasi (closing - opening) sesuai sisi normal.
+ * churnScale (0..1) menyusutkan perputaran bruto sesuai panjang jendela periode
+ * (mis. triwulan -> ~0.25); default 1 = setahun penuh.
+ */
+function mutationColumns(acc, open, close, churnScale = 1) {
   const net = close - open; // selisih pada sisi normal akun
   const churn = CHURN_BASE[acc.role];
 
   if (churn !== undefined && open > 0) {
-    const base = round1000(churn * open);
+    const base = round1000(churn * open * churnScale);
     if (acc.karakter === 'D') {
       // pencairan (debit) & pelunasan (kredit)
       return net >= 0
@@ -183,9 +284,13 @@ function mutationColumns(acc, open, close) {
  *   { kode_akun, nama_akun, karakter_akun, katagori_akun, tipe_akun, depth,
  *     saldo_awal, debit, kredit, saldo_akhir }
  */
-function snapshot(kop, year) {
-  const closeP = closingMap(kop, year);
-  const openP = closingMap(kop, year - 1);
+function snapshot(kop, year, opts = {}) {
+  const f0 = clamp01(opts.f0 ?? 0);
+  const f1 = clamp01(opts.f1 ?? 1);
+  const span = Math.max(0, f1 - f0); // panjang jendela periode (skala perputaran)
+
+  const openP = balanceAtFraction(kop, year, f0); // saldo awal jendela
+  const closeP = balanceAtFraction(kop, year, f1); // saldo akhir jendela (cut-off)
   const is = incomeStatement(kop, year);
   const rows = [];
 
@@ -197,16 +302,17 @@ function snapshot(kop, year) {
 
     if (acc.tipe === 2) {
       if (acc.katagori === 4 || acc.katagori === 5) {
-        // Akun nominal (pendapatan/biaya): di-reset tiap periode.
+        // Akun nominal (pendapatan/biaya): akumulasi proporsional thd fraksi.
         const amount = is.amt[acc.kode] || 0;
-        saldo_awal = 0;
-        saldo_akhir = amount;
-        if (acc.karakter === 'K') { kredit = amount; } else { debit = amount; }
+        saldo_awal = round1000(f0 * amount);
+        saldo_akhir = round1000(f1 * amount);
+        const mut = saldo_akhir - saldo_awal; // mutasi selama jendela
+        if (acc.karakter === 'K') { kredit = mut; } else { debit = mut; }
       } else {
         // Akun permanen (aktiva/kewajiban/modal).
         saldo_awal = openP[acc.kode] || 0;
         saldo_akhir = closeP[acc.kode] || 0;
-        const cols = mutationColumns(acc, saldo_awal, saldo_akhir);
+        const cols = mutationColumns(acc, saldo_awal, saldo_akhir, span);
         debit = cols.debit;
         kredit = cols.kredit;
       }
@@ -231,8 +337,10 @@ function snapshot(kop, year) {
 }
 
 /** Ringkasan untuk verifikasi (dipakai endpoint /debug & script check). */
-function balanceSummary(kop, year) {
-  const rows = snapshot(kop, year);
+function balanceSummary(kop, year, opts = {}) {
+  const f0 = clamp01(opts.f0 ?? 0);
+  const f1 = clamp01(opts.f1 ?? 1);
+  const rows = snapshot(kop, year, { f0, f1 });
   const by = Object.fromEntries(rows.map((r) => [r.kode_akun, r]));
   const sa = (k) => by[k].saldo_akhir;
 
@@ -245,7 +353,12 @@ function balanceSummary(kop, year) {
   const totalModal =
     sa('311000000') + sa('312000000') + sa('321000000') + sa('322000000') + sa('331000000') + sa('332000000');
 
-  const is = incomeStatement(kop, year);
+  // Laba-rugi kumulatif sampai cut-off (saldo_akhir akun nominal).
+  const pendapatan = rows.filter((r) => r.katagori_akun === 4 && r.tipe_akun === 2)
+    .reduce((s, r) => s + r.saldo_akhir, 0);
+  const beban = rows.filter((r) => r.katagori_akun === 5 && r.tipe_akun === 2)
+    .reduce((s, r) => s + r.saldo_akhir, 0);
+
   return {
     total_aset: totalAset,
     total_kewajiban: totalKewajiban,
@@ -253,9 +366,12 @@ function balanceSummary(kop, year) {
     total_pasiva: totalKewajiban + totalModal,
     selisih: totalAset - (totalKewajiban + totalModal),
     balance: totalAset === totalKewajiban + totalModal,
-    pendapatan: is.pendapatan,
-    beban: is.beban,
-    shu: is.shu,
+    pendapatan,
+    beban,
+    shu: pendapatan - beban,          // SHU laba-rugi (year-to-date)
+    shu_neraca: sa('331000000'),      // SHU pada neraca (akun 331, interpolasi)
+    f0,
+    f1,
   };
 }
 
@@ -267,4 +383,5 @@ module.exports = {
   closingMap,
   incomeStatement,
   balanceSummary,
+  fractionsFromDates,
 };

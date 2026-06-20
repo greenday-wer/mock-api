@@ -12,7 +12,9 @@ kombinasi koperasi + tahun menghasilkan angka yang:
 - **deterministik** — sama setiap kali dipanggil (pengujian dapat diulang),
 - **balance** — total aset = total liabilitas + ekuitas (exact),
 - **konsisten double-entry** — `saldo_akhir = saldo_awal ± (debit − kredit)`,
-- **kontinu antar-tahun** — saldo awal tahun N = saldo akhir tahun N−1.
+- **kontinu antar-tahun** — saldo awal tahun N = saldo akhir tahun N−1,
+- **per-periode** — neraca ditarik _year-to-date_ sampai `tanggal_sampai`, jadi
+  triwulan / semester / tahunan menghasilkan nilai berbeda (lihat §4).
 
 > Folder ini sengaja **terpisah** dari proyek SIMKOPDA agar bisa di-host sendiri,
 > seolah-olah berasal dari server/endpoint lain.
@@ -131,12 +133,41 @@ Ubah profil/skala di [`src/koperasi.js`](src/koperasi.js). Bagan akun & nama di
 
 ---
 
-## 4. Tahun buku & jalur out-of-range
+## 4. Tahun buku, periode laporan & out-of-range
 
+### Tahun buku & out-of-range
 - Tahun **2020–2026** → data tersedia, `tahun_periode` = tahun diminta.
 - Tahun di luar rentang (mis. **2019 / 2027**) → server mengembalikan tahun aktif
   terdekat (2020 atau 2026). SIMKOPDA akan menampilkan pesan _"Data tahun X tidak
   tersedia, buku periode aktif tahun Y"_ — berguna untuk menguji jalur tersebut.
+
+### Periode laporan (tahunan / semester / triwulan)
+Neraca lajur ditarik **year-to-date** dari awal tahun buku sampai `tanggal_sampai`
+(tanggal cut-off). Jadi nilai neraca **berbeda menurut periode** yang diminta:
+
+| Periode | `tanggal_dari` → `tanggal_sampai` | Fraksi tahun (≈) |
+|---|---|---|
+| Triwulan I | `2024-01-01` → `2024-03-31` | 0,25 |
+| Semester I | `2024-01-01` → `2024-06-30` | 0,50 |
+| Triwulan III (s/d) | `2024-01-01` → `2024-09-30` | 0,75 |
+| Tahunan | `2024-01-01` → `2024-12-31` | 1,00 |
+
+Cara angka dibentuk:
+- **Akun permanen** (aktiva/kewajiban/modal) — saldo di-interpolasi linear antara
+  saldo awal tahun (= tutup buku tahun lalu) dan saldo akhir tahun penuh, sesuai
+  fraksi hari yang sudah berjalan. **Kas tetap penyeimbang**, sehingga neraca
+  **selalu balance di periode mana pun**.
+- **Akun nominal** (pendapatan/biaya) — terakumulasi proporsional terhadap fraksi
+  tahun (Triwulan I ≈ ¼ nilai setahun, Semester I ≈ ½, dst).
+
+> Fraksi dihitung dari **hari** (`tanggal_sampai`), bukan bulan bulat, jadi mis.
+> `…-03-31` ≈ 0,247. `tanggal_dari` di luar 1 Januari juga didukung (mis. hanya
+> Triwulan II: `04-01` → `06-30`) — kolom debit/kredit menampilkan mutasi jendela
+> itu saja. Permintaan **setahun penuh hasilnya identik** dengan versi sebelumnya.
+>
+> Catatan: `buku_periode.lama_periode_bulan` tetap **12** karena itu definisi
+> _tahun buku_ (bukan panjang jendela yang diminta). Cek balance per periode:
+> `…/debug/balance?tanggal_dari=2024-01-01&tanggal_sampai=2024-06-30`.
 
 ---
 

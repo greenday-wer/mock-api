@@ -26,6 +26,7 @@ const { KOPERASI, MASTER_DATA_API_KEY, buildInformasi } = require('./src/koperas
 const {
   snapshot,
   balanceSummary,
+  fractionsFromDates,
   FIRST_YEAR,
   LAST_YEAR,
 } = require('./src/generator');
@@ -98,7 +99,10 @@ function buildResponse(kopKode, reqYear, req) {
   // di-clamp ke terdekat -> SIMKOPDA akan mendeteksi out-of-range karena
   // buku_periode.tahun_periode beda dari tahun yang diminta.
   const bukuYear = Math.max(FIRST_YEAR, Math.min(LAST_YEAR, reqYear));
-  const rows = snapshot(kopKode, bukuYear);
+  // Periode sub-tahunan: data ditarik year-to-date sampai tanggal_sampai
+  // (triwulan/semester/tahunan). Rentang penuh -> identik dengan versi lama.
+  const { f0, f1 } = fractionsFromDates(bukuYear, req.query.tanggal_dari, req.query.tanggal_sampai);
+  const rows = snapshot(kopKode, bukuYear, { f0, f1 });
   const tglDari = req.query.tanggal_dari || `${bukuYear}-01-01`;
   const tglSampai = req.query.tanggal_sampai || `${bukuYear}-12-31`;
 
@@ -235,12 +239,26 @@ function informasiKoperasiHandler(req, res) {
 app.get('/api/:koperasi/v1/without-auth/informasi-koperasi', informasiKoperasiHandler);
 app.get('/v1/without-auth/informasi-koperasi', informasiKoperasiHandler);
 
+/** Label periode dari fraksi cut-off (perkiraan, untuk debug/tampilan). */
+function labelPeriode(f0, f1) {
+  if (f0 <= 0.01 && f1 >= 0.99) return 'Tahunan';
+  const q = (x) => Math.round(x * 4);
+  if (f0 <= 0.01) {
+    if (q(f1) === 1) return 'Triwulan I (YTD)';
+    if (q(f1) === 2) return 'Semester I (YTD)';
+    if (q(f1) === 3) return 'Triwulan III (YTD)';
+  }
+  return `Jendela ${(f0 * 100).toFixed(0)}%–${(f1 * 100).toFixed(0)}% tahun`;
+}
+
 // ── Endpoint debug: cek neraca balance ──────────────────────────────────────
 app.get('/api/:koperasi/debug/balance', (req, res) => {
   const kode = resolveKoperasi(req);
   if (!kode) return res.status(404).json({ success: false, message: 'Koperasi tidak dikenal.' });
   const year = Math.max(FIRST_YEAR, Math.min(LAST_YEAR, yearFromQuery(req)));
-  res.json({ koperasi: kode, tahun: year, ...balanceSummary(kode, year) });
+  const { f0, f1 } = fractionsFromDates(year, req.query.tanggal_dari, req.query.tanggal_sampai);
+  const summary = balanceSummary(kode, year, { f0, f1 });
+  res.json({ koperasi: kode, tahun: year, periode: labelPeriode(f0, f1), ...summary });
 });
 
 // ── Halaman info ────────────────────────────────────────────────────────────
