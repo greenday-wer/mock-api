@@ -302,12 +302,17 @@ function snapshot(kop, year, opts = {}) {
 
     if (acc.tipe === 2) {
       if (acc.katagori === 4 || acc.katagori === 5) {
-        // Akun nominal (pendapatan/biaya): akumulasi proporsional thd fraksi.
+        // Akun nominal (pendapatan/biaya) = laporan ALIRAN: nilainya mencerminkan
+        // aktivitas SELAMA window periode [f0, f1], bukan year-to-date. Dengan
+        // begitu tiap periode benar-benar distinct: Semester 2 (Jul–Des) ≠ Tahunan,
+        // Triwulan 2 (Apr–Jun) ≠ Semester 1 (Jan–Jun), dst. Akun nominal selalu
+        // mulai 0 tiap periode (saldo_awal = 0). Untuk permintaan setahun penuh
+        // (f0=0,f1=1) hasilnya tetap = jumlah setahun seperti sebelumnya.
         const amount = is.amt[acc.kode] || 0;
-        saldo_awal = round1000(f0 * amount);
-        saldo_akhir = round1000(f1 * amount);
-        const mut = saldo_akhir - saldo_awal; // mutasi selama jendela
-        if (acc.karakter === 'K') { kredit = mut; } else { debit = mut; }
+        const flow = round1000(span * amount); // span = f1 - f0 (panjang window)
+        saldo_awal = 0;
+        saldo_akhir = flow;
+        if (acc.karakter === 'K') { kredit = flow; } else { debit = flow; }
       } else {
         // Akun permanen (aktiva/kewajiban/modal).
         saldo_awal = openP[acc.kode] || 0;
